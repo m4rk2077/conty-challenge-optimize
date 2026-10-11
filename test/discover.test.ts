@@ -111,4 +111,73 @@ describe("casos de borda da listagem", () => {
     expect(result.creators).toEqual([]);
     expect(result.total).toBe(4);
   });
+
+  it("agrega nichos, múltiplas contas e entregas sem multiplicar as relações", async () => {
+    const db = openDatabase(":memory:");
+    db.exec(`
+      INSERT INTO campaigns VALUES ('cmp_edge', 'Agregados', '["beleza","moda"]');
+      INSERT INTO creators VALUES ('crt_multi', 'Múltiplas relações', '["beleza","moda"]', '');
+      INSERT INTO social_accounts VALUES
+        ('acc_1', 'crt_multi', 'instagram'), ('acc_2', 'crt_multi', 'tiktok');
+      INSERT INTO metrics VALUES
+        ('met_old', 'acc_1', 999, '2026-05-01T00:00:00.000Z', ''),
+        ('met_a', 'acc_1', 10, '2026-05-30T00:00:00.000Z', ''),
+        ('met_z', 'acc_1', 99, '2026-05-30T00:00:00.000Z', ''),
+        ('met_2', 'acc_2', 30, '2026-05-30T00:00:00.000Z', '');
+      INSERT INTO deliveries VALUES
+        ('del_1', 'crt_multi', '2026-03-03T12:00:00.000Z'),
+        ('del_2', 'crt_multi', '2026-05-01T00:00:00.000Z'),
+        ('del_3', 'crt_multi', '2026-06-01T00:00:00.000Z'),
+        ('del_old', 'crt_multi', '2026-03-03T11:59:59.999Z');
+    `);
+    const result = await page(createApp(db));
+    expect(result).toEqual({
+      campaign_id: "cmp_edge",
+      total: 1,
+      creators: [{
+        id: "crt_multi", name: "Múltiplas relações", niche_score: 2,
+        latest_reach: 129, deliveries_90d: 3,
+      }],
+    });
+    db.close();
+  });
+
+  it("preserva a multiplicidade de nichos duplicados dos loops originais", async () => {
+    const db = openDatabase(":memory:");
+    db.exec(`
+      INSERT INTO campaigns VALUES ('cmp_edge', 'Duplicados', '["beleza","beleza","moda"]');
+      INSERT INTO creators VALUES
+        ('crt_a', 'Duplicados', '["beleza","beleza","moda"]', ''),
+        ('crt_b', 'Um nicho', '["beleza"]', '');
+    `);
+    const result = await page(createApp(db));
+    expect(result.creators).toEqual([
+      { id: "crt_a", name: "Duplicados", niche_score: 5, latest_reach: 0, deliveries_90d: 0 },
+      { id: "crt_b", name: "Um nicho", niche_score: 2, latest_reach: 0, deliveries_90d: 0 },
+    ]);
+    db.close();
+  });
+});
+
+describe.each([80, 600, 2000])("orçamento constante com %i criadores", (creators) => {
+  it.each(["página", "sem matches", "além do fim"])("usa três queries: %s", async (scenario) => {
+    const db = openDatabase(":memory:");
+    seed(db, { creators, seed: 7 });
+    db.exec("INSERT INTO campaigns VALUES ('cmp_empty', 'Vazia', '[\"inexistente\"]')");
+    const campaignId = scenario === "sem matches" ? "cmp_empty" : CAMPAIGN_ID;
+    const offset = scenario === "além do fim" ? creators : 0;
+    resetQueryCount();
+    const res = await createApp(db).request(`/campaigns/${campaignId}/creators?limit=20&offset=${offset}`);
+    expect(res.status).toBe(200);
+    expect(getQueryCount()).toBe(3);
+    const result = await res.json() as Page & { campaign_id: string };
+    expect(result.campaign_id).toBe(campaignId);
+    if (scenario === "sem matches") {
+      expect(result).toEqual({ campaign_id: campaignId, total: 0, creators: [] });
+    } else {
+      expect(result.total).toBeGreaterThan(20);
+      expect(result.creators).toHaveLength(scenario === "página" ? 20 : 0);
+    }
+    db.close();
+  });
 });
